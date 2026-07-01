@@ -24,3 +24,11 @@ Regarding updates, I will certainly align this tool with any updates released by
 
 * **Jane Doe & Dialyn Fix**: [Satan1c](https://github.com/Satan1c/ZZMI_tools/wiki/Jane-2.5-fix)
 * **Releases**: [Satan1c](https://github.com/Satan1c/ZZMI_tools/releases/tag/2.5)
+
+---
+
+## How to Use
+
+Since this is specific to the Jane Doe and Dialyn characters, the `.exe` file must be placed directly inside the respective character's mod folder rather than the main `Mods` folder, as it functions differently from the standard `zzz-mod-fixer.exe` [(ZZZ-Mod-Fixer)](https://github.com/Vonksdesu/ZZZ-Mod-Fixer/releases).
+
+For further instructions, you can visit [Satan1c](https://github.com/Satan1c/ZZMI_tools/wiki/Jane-2.5-fix) GitHub page directly.
