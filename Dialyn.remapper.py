@@ -13,7 +13,6 @@ import time
 import struct
 import shutil
 from pathlib import Path
-from collections import defaultdict
 
 # ============================================================================
 # Remapping dictionaries derived from Dialyn.remapper.cs
@@ -50,6 +49,7 @@ RESOURCE_SECTION_REGEX = re.compile(
     re.IGNORECASE | re.MULTILINE
 )
 
+VALID_BLEND_HASHES = {'3d7e53cf'}
 
 def clean_and_get_lines(ini_path):
     """
@@ -96,7 +96,7 @@ def get_resource_names(separate_lines):
             target_hash = raw_hash
             
             # Map position hashes to blend hashes if necessary
-            if target_hash not in BLEND_MAPPING:
+            if target_hash not in VALID_BLEND_HASHES:
                 if target_hash in POSITION_TO_BLEND:
                     target_hash = POSITION_TO_BLEND[target_hash]
                 else:
@@ -147,6 +147,55 @@ def get_resource_files(names_map, ini_content_cleaned, ini_dir):
             resource_files_map[target_hash] = files_list
             
     return resource_files_map
+
+
+def broad_scan_vb2_resources(separate_lines, ini_content_cleaned):
+    """
+    Fallback scanner: finds ALL vb2 resources bound to stride-32 buffers,
+    regardless of whether their hashes are recognized.
+    Returns resource_names_map keyed by 'broad_scan'.
+    """
+    resource_names_map = {}
+    
+    vb2_pattern = re.compile(r'^vb2\s*=\s*Resource([a-zA-Z0-9_]+)$', re.IGNORECASE)
+    all_vb2_resources = []
+    
+    i = 0
+    while i < len(separate_lines):
+        line = separate_lines[i]
+        if line.startswith('['):
+            i += 1
+            continue
+        res_match = vb2_pattern.match(line)
+        if res_match:
+            all_vb2_resources.append(res_match.group(1))
+        i += 1
+    
+    seen = set()
+    unique_vb2 = []
+    for name in all_vb2_resources:
+        if name not in seen:
+            seen.add(name)
+            unique_vb2.append(name)
+    
+    resource_pattern = re.compile(
+        r'^\[Resource([a-zA-Z0-9_]+)\]\s*\n'
+        r'type\s*=\s*Buffer\s*\n'
+        r'stride\s*=\s*32\s*\n'
+        r'filename\s*=\s*(.+)$',
+        re.IGNORECASE | re.MULTILINE
+    )
+    matches = resource_pattern.findall(ini_content_cleaned)
+    stride32_names = {name for name, _ in matches}
+    
+    for res_name in unique_vb2:
+        if res_name not in stride32_names:
+            continue
+        if 'broad_scan' not in resource_names_map:
+            resource_names_map['broad_scan'] = []
+        resource_names_map['broad_scan'].append(res_name)
+    
+    return resource_names_map
 
 
 def remap_binary(target_hash, file_path, timestamp):
@@ -205,36 +254,40 @@ def main():
 
     if not inis:
         print("No .ini files found in current directory and subdirectories.")
+        print("Press any key to exit...")
+        try:
+            input()
+        except EOFError:
+            pass
         return
 
     print(f"Found {len(inis)} active .ini files. Analyzing...")
 
     resource_names_list = []
     ini_dirs = []
+    ini_contents = []
     
     for ini_file in inis:
         try:
-            _, separate_lines = clean_and_get_lines(ini_file)
+            content, separate_lines = clean_and_get_lines(ini_file)
             res_names = get_resource_names(separate_lines)
+            
+            if not res_names:
+                res_names = broad_scan_vb2_resources(separate_lines, content)
+            
             resource_names_list.append(res_names)
             ini_dirs.append(ini_file.parent)
+            ini_contents.append(content)
         except Exception as e:
             print(f"Failed to process {ini_file.name}: {e}")
             resource_names_list.append({})
             ini_dirs.append(ini_file.parent)
+            ini_contents.append("")
 
     # Get resource files
     resource_files_list = []
-    for res_names, ini_dir in zip(resource_names_list, ini_dirs):
+    for res_names, ini_dir, content in zip(resource_names_list, ini_dirs, ini_contents):
         try:
-            _, separate_lines = clean_and_get_lines(ini_dir.parent / "placeholder")
-            content, _ = clean_and_get_lines(ini_dir.parent / "placeholder")
-            # Re-read full content for regex matching
-            ini_files = [f for f in ini_dir.glob("*.ini") if not f.name.lower().startswith("disabled")]
-            if ini_files:
-                content, _ = clean_and_get_lines(ini_files[0])
-            else:
-                content = ""
             res_files = get_resource_files(res_names, content, ini_dir)
             resource_files_list.append(res_files)
         except Exception as e:
@@ -245,15 +298,24 @@ def main():
     files_processed = 0
 
     for res_files in resource_files_list:
+        unique_files = {}
         for target_hash, files in res_files.items():
             for f in files:
-                remap_binary(target_hash, f, timestamp)
-                files_processed += 1
+                if f not in unique_files:
+                    unique_files[f] = target_hash
+        
+        for f, target_hash in unique_files.items():
+            remap_binary(target_hash, f, timestamp)
+            files_processed += 1
 
     elapsed = time.perf_counter() - start_time
     print(f"\nExecution finished. Processed {files_processed} buffer files.")
     print(f"Total time elapsed: {elapsed:.4f} seconds")
-
+    print("\nPress Enter to exit...")
+    try:
+        input()
+    except EOFError:
+        pass
 
 if __name__ == '__main__':
     main()

@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+"""
+Jane Doe Blend Remapper
+Translated from Jane.remapper.cs by Satan1c
+https://github.com/Satan1c/ZZMI_tools/releases/tag/2.5
+
+Remaps blend bone indices for Jane Doe character mods to match
+the updated 3D model structure in ZZZ 3.0+.
+"""
 import os
 import re
 import time
 import struct
 import shutil
 from pathlib import Path
+
 
 # Remapping dictionaries derived from Satan1c's C# source
 HAIR_MAPPINGS = {
@@ -64,6 +73,7 @@ def clean_and_get_lines(ini_path):
 def get_resource_names(separate_lines):
     """
     Parses clean lines to identify targeted hashes and their linked VB2 blend resources.
+    Falls back to broad scan if no recognized blend hashes are found.
     """
     resource_names_map = {}
     hash_pattern = re.compile(r'^hash\s*=\s*([a-f0-9]{8})$', re.IGNORECASE)
@@ -82,7 +92,7 @@ def get_resource_names(separate_lines):
             target_hash = raw_hash
             
             # Map position hashes to blend hashes if necessary
-            if target_hash not in ["e42171df", "d06a9206"]:
+            if target_hash not in ('e42171df', 'd06a9206'):
                 if target_hash in POSITION_TO_BLEND:
                     target_hash = POSITION_TO_BLEND[target_hash]
                 else:
@@ -115,9 +125,73 @@ def get_resource_names(separate_lines):
             
     return resource_names_map
 
+
+def broad_scan_vb2_resources(separate_lines, ini_content_cleaned):
+    """
+    Fallback scanner: finds ALL vb2 resources bound to stride-32 buffers,
+    regardless of whether their hashes are recognized.
+    Returns resource_names_map keyed by heuristic category: 'hair' or 'hand'.
+    """
+    resource_names_map = {}
+    
+    # First pass: collect all vb2 bindings from all sections
+    vb2_pattern = re.compile(r'^vb2\s*=\s*Resource([a-zA-Z0-9_]+)$', re.IGNORECASE)
+    all_vb2_resources = []
+    
+    i = 0
+    while i < len(separate_lines):
+        line = separate_lines[i]
+        if line.startswith('['):
+            i += 1
+            continue
+        res_match = vb2_pattern.match(line)
+        if res_match:
+            all_vb2_resources.append(res_match.group(1))
+        i += 1
+    
+    # Deduplicate while preserving order
+    seen = set()
+    unique_vb2 = []
+    for name in all_vb2_resources:
+        if name not in seen:
+            seen.add(name)
+            unique_vb2.append(name)
+    
+    # Second pass: match against Resource sections with stride = 32
+    resource_pattern = re.compile(
+        r'^\[Resource([a-zA-Z0-9_]+)\]\s*\n'
+        r'type\s*=\s*Buffer\s*\n'
+        r'stride\s*=\s*32\s*\n'
+        r'filename\s*=\s*(.+)$',
+        re.IGNORECASE | re.MULTILINE
+    )
+    matches = resource_pattern.findall(ini_content_cleaned)
+    stride32_names = {name for name, _ in matches}
+    
+    for res_name in unique_vb2:
+        if res_name not in stride32_names:
+            continue
+        
+        # Heuristic categorization by filename
+        name_lower = res_name.lower()
+        if 'hair' in name_lower or 'head' in name_lower:
+            category = 'hair'
+        elif 'hand' in name_lower or 'finger' in name_lower or 'accessor' in name_lower or 'knife' in name_lower:
+            category = 'hand'
+        else:
+            category = 'unknown'
+        
+        if category not in resource_names_map:
+            resource_names_map[category] = []
+        resource_names_map[category].append(res_name)
+    
+    return resource_names_map
+
 def get_resource_files(names_map, ini_content_cleaned, ini_dir):
     """
     Finds exact .buf filenames corresponding to the matched VB2 resources.
+    Supports both hash-driven keys (e42171df, d06a9206) and broad-scan
+    category keys ('hair', 'hand', 'unknown').
     """
     resource_files_map = {}
     resource_pattern = re.compile(
@@ -145,6 +219,10 @@ def get_resource_files(names_map, ini_content_cleaned, ini_dir):
 def remap_binary(target_hash, file_path, timestamp):
     """
     Performs vertex remapping inside the .buf file by modifying weight indices.
+    
+    target_hash can be:
+    - Specific hash: 'e42171df' (hair) or 'd06a9206' (hand)
+    - Broad-scan category: 'hair', 'hand', or 'unknown'
     """
     try:
         byte_data = file_path.read_bytes()
@@ -157,7 +235,20 @@ def remap_binary(target_hash, file_path, timestamp):
         return
         
     output_bytes = bytearray(len(byte_data))
-    mapping = HAIR_MAPPINGS if target_hash == "e42171df" else HAND_MAPPINGS
+    
+    # Select mapping based on hash or broad-scan category
+    if target_hash == 'e42171df':
+        mapping = HAIR_MAPPINGS
+    elif target_hash == 'd06a9206':
+        mapping = HAND_MAPPINGS
+    elif target_hash == 'hair':
+        mapping = HAIR_MAPPINGS
+    elif target_hash == 'hand':
+        mapping = HAND_MAPPINGS
+    else:
+        # 'unknown' or unrecognized hash: skip to avoid corrupting non-blend buffers
+        print(f"  Skipping {file_path.name}: unknown blend category '{target_hash}'")
+        return
     
     for x in range(num_vertices):
         group = x * STRIDE
@@ -201,7 +292,10 @@ def main():
     if not inis:
         print("No .ini files found in current directory and subdirectories.")
         print("Press any key to exit...")
-        input()
+        try:
+            input()
+        except EOFError:
+            pass
         return
 
     print(f"Found {len(inis)} active .ini files. Analyzing...")
@@ -213,22 +307,35 @@ def main():
         try:
             content, separate_lines = GetIniLines_py(ini_file)
             names_map = get_resource_names(separate_lines)
+            
+            # Fallback: if no recognized blend hashes found, broad-scan all vb2 stride-32 buffers
+            if not names_map:
+                names_map = broad_scan_vb2_resources(separate_lines, content)
+            
             if not names_map:
                 continue
                 
             resource_files = get_resource_files(names_map, content, ini_file.parent)
             
+            unique_files = {}
             for target_hash, files in resource_files.items():
                 for f in files:
-                    remap_binary(target_hash, f, timestamp)
-                    files_processed += 1
+                    if f not in unique_files:
+                        unique_files[f] = target_hash
+            
+            for f, target_hash in unique_files.items():
+                remap_binary(target_hash, f, timestamp)
+                files_processed += 1
         except Exception as e:
             print(f"Failed to process {ini_file.name}: {e}")
 
     print(f"\nExecution finished. Processed {files_processed} buffer files.")
     print(f"Total time elapsed: {Stopwatch_GetElapsedTime_py(start_time):.4f} seconds")
     print("\nPress Enter to exit...")
-    input()
+    try:
+        input()
+    except EOFError:
+        pass
 
 # Simulation helpers of C#'s Stopwatch and Timestamp
 def Stopwatch_GetTimestamp():
